@@ -198,9 +198,140 @@ class SyslogParser(BaseParser):
         )
 
 
+class AuthLogParser(BaseParser):
+    """Parser for Linux auth.log files.
+
+    Handles SSH login attempts, sudo commands, su sessions, and other
+    PAM authentication events. Extracts additional metadata such as
+    source IP addresses, usernames, and authentication methods.
+
+    Expected format::
+
+        Jan  5 14:23:01 server sshd[12345]: Failed password for root from 192.168.1.100 port 22 ssh2
+    """
+
+    source_type: str = "authlog"
+
+    _PATTERN = re.compile(
+        r"^(?P<timestamp>[A-Z][a-z]{2}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2})\s+"
+        r"(?P<hostname>\S+)\s+"
+        r"(?P<program>[\w\-\.\/]+)"
+        r"(?:\[(?P<pid>\d+)\])?"
+        r":\s+"
+        r"(?P<message>.+)$"
+    )
+
+    _FAILED_SSH = re.compile(
+        r"Failed (?:password|publickey) for (?:invalid user )?(?P<user>\S+)\s+"
+        r"from (?P<ip>\S+)\s+port\s+(?P<port>\d+)"
+    )
+    _ACCEPTED_SSH = re.compile(
+        r"Accepted (?P<method>\S+) for (?P<user>\S+)\s+"
+        r"from (?P<ip>\S+)\s+port\s+(?P<port>\d+)"
+    )
+    _SUDO_COMMAND = re.compile(
+        r"(?P<user>\S+)\s+:\s+TTY=\S+\s*;\s*PWD=\S+\s*;\s*USER=(?P<target_user>\S+)\s*;\s*"
+        r"COMMAND=(?P<command>.+)$"
+    )
+    _SU_SESSION = re.compile(
+        r"pam_unix\(su(?:-l)?:session\):\s+session (?P<action>opened|closed)\s+"
+        r"for user (?P<target_user>\S+)(?:\s+by\s+(?P<by_user>\S+))?"
+    )
+
+    def _classify_auth_event(self, message: str) -> tuple[Severity, dict]:
+        """Classify the auth event and extract metadata."""
+        metadata: dict = {}
+
+        failed_match = self._FAILED_SSH.search(message)
+        if failed_match:
+            metadata["event_type"] = "failed_login"
+            metadata["username"] = failed_match.group("user")
+            metadata["source_ip"] = failed_match.group("ip")
+            metadata["port"] = int(failed_match.group("port"))
+            return Severity.WARNING, metadata
+
+        accepted_match = self._ACCEPTED_SSH.search(message)
+        if accepted_match:
+            metadata["event_type"] = "successful_login"
+            metadata["username"] = accepted_match.group("user")
+            metadata["source_ip"] = accepted_match.group("ip")
+            metadata["port"] = int(accepted_match.group("port"))
+            metadata["auth_method"] = accepted_match.group("method")
+            return Severity.INFO, metadata
+
+        sudo_match = self._SUDO_COMMAND.search(message)
+        if sudo_match:
+            metadata["event_type"] = "sudo_command"
+            metadata["username"] = sudo_match.group("user")
+            metadata["target_user"] = sudo_match.group("target_user")
+            metadata["command"] = sudo_match.group("command")
+            severity = Severity.NOTICE
+            if sudo_match.group("target_user") == "root":
+                severity = Severity.WARNING
+            return severity, metadata
+
+        su_match = self._SU_SESSION.search(message)
+        if su_match:
+            metadata["event_type"] = "su_session"
+            metadata["action"] = su_match.group("action")
+            metadata["target_user"] = su_match.group("target_user")
+            if su_match.group("by_user"):
+                metadata["by_user"] = su_match.group("by_user")
+            return Severity.NOTICE, metadata
+
+        if "authentication failure" in message.lower():
+            metadata["event_type"] = "auth_failure"
+            return Severity.WARNING, metadata
+
+        metadata["event_type"] = "other"
+        return Severity.INFO, metadata
+
+    def parse_line(self, line: str) -> Optional[LogEntry]:
+        """Parse a single auth.log line.
+
+        Args:
+            line: A raw auth.log line.
+
+        Returns:
+            A LogEntry if parsing succeeds, otherwise None.
+        """
+        match = self._PATTERN.match(line)
+        if not match:
+            return None
+
+        groups = match.groupdict()
+
+        try:
+            ts = datetime.strptime(groups["timestamp"], "%b %d %H:%M:%S")
+            ts = ts.replace(year=datetime.now().year)
+        except ValueError:
+            try:
+                ts = datetime.strptime(groups["timestamp"], "%b  %d %H:%M:%S")
+                ts = ts.replace(year=datetime.now().year)
+            except ValueError:
+                return None
+
+        pid = int(groups["pid"]) if groups["pid"] else None
+        message = groups["message"]
+        severity, metadata = self._classify_auth_event(message)
+
+        return LogEntry(
+            timestamp=ts,
+            source=self.source_type,
+            hostname=groups["hostname"],
+            message=message,
+            severity=severity,
+            raw=line,
+            program=groups["program"],
+            pid=pid,
+            metadata=metadata,
+        )
+
+
 def get_parser(format_name: str) -> BaseParser:
     parsers: dict[str, type[BaseParser]] = {
         "syslog": SyslogParser,
+        "authlog": AuthLogParser,
     }
 
     if format_name not in parsers:
