@@ -328,10 +328,127 @@ class AuthLogParser(BaseParser):
         )
 
 
+class ApacheParser(BaseParser):
+    """Parser for Apache/Nginx combined and common access log formats.
+
+    Combined log format::
+
+        127.0.0.1 - frank [10/Oct/2000:13:55:36 -0700] "GET /index.html HTTP/1.0" 200 2326 "http://ref.com" "Mozilla/5.0"
+
+    Common log format::
+
+        127.0.0.1 - frank [10/Oct/2000:13:55:36 -0700] "GET /index.html HTTP/1.0" 200 2326
+    """
+
+    source_type: str = "apache"
+
+    # Combined log format regex
+    _PATTERN = re.compile(
+        r'^(?P<ip>\S+)\s+'
+        r'(?P<ident>\S+)\s+'
+        r'(?P<user>\S+)\s+'
+        r'\[(?P<timestamp>[^\]]+)\]\s+'
+        r'"(?P<method>\S+)\s+(?P<path>\S+)\s+(?P<protocol>[^"]+)"\s+'
+        r'(?P<status>\d{3})\s+'
+        r'(?P<size>\S+)'
+        r'(?:\s+"(?P<referrer>[^"]*)"\s+"(?P<user_agent>[^"]*)")?'
+    )
+
+    _SUSPICIOUS_PATHS = [
+        r"/etc/passwd",
+        r"/etc/shadow",
+        r"\.\./",
+        r"/wp-admin",
+        r"/phpmyadmin",
+        r"/admin",
+        r"\.env",
+        r"/\.git",
+        r"/shell",
+        r"/cmd",
+        r"/eval",
+    ]
+    _SUSPICIOUS_PATTERN = re.compile("|".join(_SUSPICIOUS_PATHS), re.IGNORECASE)
+
+    def _status_to_severity(self, status: int, path: str) -> Severity:
+        """Map HTTP status code and path to severity."""
+        if self._SUSPICIOUS_PATTERN.search(path):
+            return Severity.WARNING
+        if status >= 500:
+            return Severity.ERROR
+        if status == 403:
+            return Severity.WARNING
+        if status == 404:
+            return Severity.NOTICE
+        if status >= 400:
+            return Severity.NOTICE
+        return Severity.INFO
+
+    def parse_line(self, line: str) -> Optional[LogEntry]:
+        """Parse a single Apache/Nginx access log line.
+
+        Args:
+            line: A raw access log line.
+
+        Returns:
+            A LogEntry if parsing succeeds, otherwise None.
+        """
+        match = self._PATTERN.match(line)
+        if not match:
+            return None
+
+        groups = match.groupdict()
+
+        # Parse Apache timestamp: 10/Oct/2000:13:55:36 -0700
+        try:
+            ts = datetime.strptime(groups["timestamp"], "%d/%b/%Y:%H:%M:%S %z")
+            # Convert to naive datetime for consistent comparison
+            ts = ts.replace(tzinfo=None)
+        except ValueError:
+            try:
+                # Try without timezone
+                ts_str = groups["timestamp"].rsplit(" ", 1)[0]
+                ts = datetime.strptime(ts_str, "%d/%b/%Y:%H:%M:%S")
+            except ValueError:
+                return None
+
+        status = int(groups["status"])
+        path = groups["path"]
+        size = int(groups["size"]) if groups["size"] != "-" else 0
+
+        message = f'{groups["method"]} {path} {groups["protocol"]} {status}'
+
+        metadata: dict = {
+            "source_ip": groups["ip"],
+            "method": groups["method"],
+            "path": path,
+            "protocol": groups["protocol"],
+            "status_code": status,
+            "response_size": size,
+            "ident": groups["ident"],
+            "remote_user": groups["user"],
+        }
+
+        if groups.get("referrer"):
+            metadata["referrer"] = groups["referrer"]
+        if groups.get("user_agent"):
+            metadata["user_agent"] = groups["user_agent"]
+
+        return LogEntry(
+            timestamp=ts,
+            source=self.source_type,
+            hostname=groups["ip"],
+            message=message,
+            severity=self._status_to_severity(status, path),
+            raw=line,
+            metadata=metadata,
+        )
+
+
 def get_parser(format_name: str) -> BaseParser:
     parsers: dict[str, type[BaseParser]] = {
         "syslog": SyslogParser,
         "authlog": AuthLogParser,
+        "apache": ApacheParser,
     }
 
     if format_name not in parsers:
