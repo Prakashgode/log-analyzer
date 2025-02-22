@@ -444,11 +444,240 @@ class ApacheParser(BaseParser):
         )
 
 
+class WindowsEventParser(BaseParser):
+    """Parser for Windows Event Log XML exports.
+
+    Handles the XML format produced by ``wevtutil qe`` or exported
+    from Event Viewer. Each ``<Event>`` element is parsed into a
+    LogEntry with extracted metadata.
+
+    Expected XML structure::
+
+        <Events>
+          <Event xmlns="http://schemas.microsoft.com/win/2004/08/events/event">
+            <System>
+              <Provider Name="..." />
+              <EventID>4625</EventID>
+              <Level>0</Level>
+              <TimeCreated SystemTime="2024-01-05T14:23:01.000Z" />
+              <Computer>WORKSTATION01</Computer>
+            </System>
+            <EventData>
+              <Data Name="TargetUserName">admin</Data>
+              ...
+            </EventData>
+          </Event>
+        </Events>
+    """
+
+    source_type: str = "windows"
+
+    _NS = {"evt": "http://schemas.microsoft.com/win/2004/08/events/event"}
+
+    _LEVEL_MAP: dict[int, Severity] = {
+        0: Severity.INFO,       # LogAlways
+        1: Severity.CRITICAL,   # Critical
+        2: Severity.ERROR,      # Error
+        3: Severity.WARNING,    # Warning
+        4: Severity.INFO,       # Informational
+        5: Severity.DEBUG,      # Verbose
+    }
+
+    # Security event IDs of interest
+    _SECURITY_EVENTS: dict[int, str] = {
+        4624: "Successful Logon",
+        4625: "Failed Logon",
+        4634: "Logoff",
+        4648: "Logon Using Explicit Credentials",
+        4672: "Special Privileges Assigned",
+        4688: "Process Creation",
+        4697: "Service Installed",
+        4720: "User Account Created",
+        4722: "User Account Enabled",
+        4724: "Password Reset Attempted",
+        4732: "Member Added to Security Group",
+        4768: "Kerberos TGT Requested",
+        4769: "Kerberos Service Ticket Requested",
+        4776: "NTLM Authentication",
+    }
+
+    def parse_line(self, line: str) -> Optional[LogEntry]:
+        """Parse is not used for XML; use parse_file or parse_xml instead.
+
+        This method attempts to parse a single-line XML Event element.
+        For multi-line XML, use ``parse_xml_string`` or ``parse_file``.
+        """
+        # Attempt to parse a single <Event>...</Event> line
+        return self._parse_event_xml(line)
+
+    def parse_file(self, filepath: Union[str, Path]) -> List[LogEntry]:
+        """Parse a Windows Event Log XML export file.
+
+        Handles both single-root ``<Events>`` documents and files
+        containing multiple ``<Event>`` elements.
+
+        Args:
+            filepath: Path to the XML event log file.
+
+        Returns:
+            List of successfully parsed LogEntry instances.
+        """
+        filepath = Path(filepath)
+        content = filepath.read_text(encoding="utf-8", errors="replace")
+        return self.parse_xml_string(content)
+
+    def parse_xml_string(self, xml_content: str) -> List[LogEntry]:
+        """Parse a Windows Event Log XML string.
+
+        Args:
+            xml_content: XML string containing Event elements.
+
+        Returns:
+            List of successfully parsed LogEntry instances.
+        """
+        entries: List[LogEntry] = []
+
+        # Wrap in root if needed
+        stripped = xml_content.strip()
+        if not stripped.startswith("<Events"):
+            if stripped.startswith("<Event"):
+                xml_content = f"<Events>{xml_content}</Events>"
+            else:
+                return entries
+
+        try:
+            root = ET.fromstring(xml_content)
+        except ET.ParseError:
+            return entries
+
+        # Find all Event elements (with or without namespace)
+        events = root.findall("evt:Event", self._NS)
+        if not events:
+            events = root.findall("Event")
+        if not events:
+            events = root.findall(".//{http://schemas.microsoft.com/win/2004/08/events/event}Event")
+
+        for event_elem in events:
+            entry = self._parse_event_element(event_elem)
+            if entry is not None:
+                entries.append(entry)
+
+        return entries
+
+    def _parse_event_xml(self, xml_line: str) -> Optional[LogEntry]:
+        """Parse a single Event XML element from a string."""
+        try:
+            elem = ET.fromstring(xml_line)
+            return self._parse_event_element(elem)
+        except ET.ParseError:
+            return None
+
+    @staticmethod
+    def _find_element(parent: ET.Element, ns_name: str, bare_name: str, ns: dict) -> Optional[ET.Element]:
+        """Find an element by namespaced name first, then bare name.
+
+        Uses explicit ``is None`` checks to avoid issues with
+        ElementTree elements whose boolean evaluation depends on
+        child count.
+        """
+        elem = parent.find(ns_name, ns)
+        if elem is None:
+            elem = parent.find(bare_name)
+        return elem
+
+    def _parse_event_element(self, event: ET.Element) -> Optional[LogEntry]:
+        """Parse an ET Event element into a LogEntry."""
+        ns = self._NS
+
+        # Try namespaced first, then bare
+        system = self._find_element(event, "evt:System", "System", ns)
+        if system is None:
+            return None
+
+        # Extract fields from System
+        provider_elem = self._find_element(system, "evt:Provider", "Provider", ns)
+        provider_name = ""
+        if provider_elem is not None:
+            provider_name = provider_elem.get("Name", "")
+
+        event_id_elem = self._find_element(system, "evt:EventID", "EventID", ns)
+        event_id = int(event_id_elem.text) if event_id_elem is not None and event_id_elem.text else 0
+
+        level_elem = self._find_element(system, "evt:Level", "Level", ns)
+        level = int(level_elem.text) if level_elem is not None and level_elem.text else 4
+
+        time_elem = self._find_element(system, "evt:TimeCreated", "TimeCreated", ns)
+        if time_elem is None:
+            return None
+
+        time_str = time_elem.get("SystemTime", "")
+        try:
+            # Handle various timestamp formats
+            if time_str.endswith("Z"):
+                ts = datetime.fromisoformat(time_str.replace("Z", "+00:00"))
+                ts = ts.replace(tzinfo=None)
+            else:
+                ts = datetime.fromisoformat(time_str)
+                ts = ts.replace(tzinfo=None)
+        except ValueError:
+            return None
+
+        computer_elem = self._find_element(system, "evt:Computer", "Computer", ns)
+        hostname = computer_elem.text if computer_elem is not None and computer_elem.text else "unknown"
+
+        # Extract EventData
+        metadata: dict = {
+            "event_id": event_id,
+            "provider": provider_name,
+        }
+
+        event_data = self._find_element(event, "evt:EventData", "EventData", ns)
+        if event_data is not None:
+            for data_elem in event_data:
+                name = data_elem.get("Name", "")
+                value = data_elem.text or ""
+                if name:
+                    metadata[name] = value
+
+        # Build message
+        event_description = self._SECURITY_EVENTS.get(event_id, f"Event {event_id}")
+        message = f"[{provider_name}] {event_description}"
+
+        severity = self._LEVEL_MAP.get(level, Severity.INFO)
+        # Elevate severity for known security events
+        if event_id in (4625, 4648, 4672, 4697, 4720, 4732):
+            if severity.value in ("INFO", "DEBUG"):
+                severity = Severity.WARNING
+
+        return LogEntry(
+            timestamp=ts,
+            source=self.source_type,
+            hostname=hostname,
+            message=message,
+            severity=severity,
+            raw=ET.tostring(event, encoding="unicode"),
+            program=provider_name,
+            metadata=metadata,
+        )
+
+
 def get_parser(format_name: str) -> BaseParser:
+    """Factory function to get a parser by format name.
+
+    Args:
+        format_name: One of 'syslog', 'authlog', 'apache', 'windows'.
+
+    Returns:
+        An instance of the appropriate parser.
+
+    Raises:
+        ValueError: If the format name is not recognized.
+    """
     parsers: dict[str, type[BaseParser]] = {
         "syslog": SyslogParser,
         "authlog": AuthLogParser,
         "apache": ApacheParser,
+        "windows": WindowsEventParser,
     }
 
     if format_name not in parsers:
