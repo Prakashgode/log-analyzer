@@ -180,3 +180,218 @@ class TestAuthLogParser:
 # ---------------------------------------------------------------------------
 # ApacheParser tests
 # ---------------------------------------------------------------------------
+
+class TestApacheParser:
+    """Tests for the ApacheParser class."""
+
+    def setup_method(self) -> None:
+        self.parser = ApacheParser()
+
+    def test_parse_combined_log_format(self) -> None:
+        line = (
+            '192.168.1.50 - frank [10/Oct/2024:13:55:36 -0700] '
+            '"GET /index.html HTTP/1.1" 200 2326 '
+            '"http://www.example.com/" "Mozilla/5.0 (X11; Linux x86_64)"'
+        )
+        entry = self.parser.parse_line(line)
+
+        assert entry is not None
+        assert entry.metadata["source_ip"] == "192.168.1.50"
+        assert entry.metadata["method"] == "GET"
+        assert entry.metadata["path"] == "/index.html"
+        assert entry.metadata["status_code"] == 200
+        assert entry.metadata["response_size"] == 2326
+        assert entry.metadata["remote_user"] == "frank"
+        assert entry.metadata["referrer"] == "http://www.example.com/"
+        assert "Mozilla" in entry.metadata["user_agent"]
+        assert entry.severity == Severity.INFO
+
+    def test_parse_common_log_format(self) -> None:
+        line = '127.0.0.1 - - [10/Oct/2024:13:55:36 -0700] "GET /page HTTP/1.0" 200 1234'
+        entry = self.parser.parse_line(line)
+
+        assert entry is not None
+        assert entry.metadata["source_ip"] == "127.0.0.1"
+        assert entry.metadata["path"] == "/page"
+
+    def test_parse_404_severity(self) -> None:
+        line = '10.0.0.1 - - [10/Oct/2024:13:55:36 -0700] "GET /missing HTTP/1.1" 404 0'
+        entry = self.parser.parse_line(line)
+
+        assert entry is not None
+        assert entry.severity == Severity.NOTICE
+
+    def test_parse_500_severity(self) -> None:
+        line = '10.0.0.1 - - [10/Oct/2024:13:55:36 -0700] "POST /api HTTP/1.1" 500 128'
+        entry = self.parser.parse_line(line)
+
+        assert entry is not None
+        assert entry.severity == Severity.ERROR
+
+    def test_parse_suspicious_path(self) -> None:
+        line = '10.0.0.1 - - [10/Oct/2024:13:55:36 -0700] "GET /etc/passwd HTTP/1.1" 200 0'
+        entry = self.parser.parse_line(line)
+
+        assert entry is not None
+        assert entry.severity == Severity.WARNING
+
+    def test_parse_directory_traversal(self) -> None:
+        line = '10.0.0.1 - - [10/Oct/2024:13:55:36 -0700] "GET /../../etc/shadow HTTP/1.1" 403 0'
+        entry = self.parser.parse_line(line)
+
+        assert entry is not None
+        assert entry.severity == Severity.WARNING
+
+    def test_parse_invalid_line(self) -> None:
+        entry = self.parser.parse_line("not an access log line")
+        assert entry is None
+
+
+# ---------------------------------------------------------------------------
+# WindowsEventParser tests
+# ---------------------------------------------------------------------------
+
+class TestWindowsEventParser:
+    """Tests for the WindowsEventParser class."""
+
+    def setup_method(self) -> None:
+        self.parser = WindowsEventParser()
+
+    def test_parse_failed_logon_event(self) -> None:
+        xml = textwrap.dedent("""\
+            <Events>
+            <Event xmlns="http://schemas.microsoft.com/win/2004/08/events/event">
+              <System>
+                <Provider Name="Microsoft-Windows-Security-Auditing" />
+                <EventID>4625</EventID>
+                <Level>0</Level>
+                <TimeCreated SystemTime="2024-01-05T14:23:01.000Z" />
+                <Computer>WORKSTATION01</Computer>
+              </System>
+              <EventData>
+                <Data Name="TargetUserName">admin</Data>
+                <Data Name="IpAddress">192.168.1.50</Data>
+              </EventData>
+            </Event>
+            </Events>
+        """)
+        entries = self.parser.parse_xml_string(xml)
+
+        assert len(entries) == 1
+        entry = entries[0]
+        assert entry.metadata["event_id"] == 4625
+        assert entry.metadata["TargetUserName"] == "admin"
+        assert entry.metadata["IpAddress"] == "192.168.1.50"
+        assert entry.hostname == "WORKSTATION01"
+        assert entry.severity == Severity.WARNING  # 4625 elevated
+
+    def test_parse_successful_logon_event(self) -> None:
+        xml = textwrap.dedent("""\
+            <Events>
+            <Event xmlns="http://schemas.microsoft.com/win/2004/08/events/event">
+              <System>
+                <Provider Name="Microsoft-Windows-Security-Auditing" />
+                <EventID>4624</EventID>
+                <Level>0</Level>
+                <TimeCreated SystemTime="2024-01-05T10:00:00.000Z" />
+                <Computer>DC01</Computer>
+              </System>
+              <EventData>
+                <Data Name="TargetUserName">jdoe</Data>
+                <Data Name="IpAddress">10.0.0.5</Data>
+                <Data Name="LogonType">10</Data>
+              </EventData>
+            </Event>
+            </Events>
+        """)
+        entries = self.parser.parse_xml_string(xml)
+
+        assert len(entries) == 1
+        entry = entries[0]
+        assert entry.metadata["event_id"] == 4624
+        assert "Successful Logon" in entry.message
+
+    def test_parse_multiple_events(self) -> None:
+        xml = textwrap.dedent("""\
+            <Events>
+            <Event xmlns="http://schemas.microsoft.com/win/2004/08/events/event">
+              <System>
+                <Provider Name="Provider1" />
+                <EventID>4624</EventID>
+                <Level>4</Level>
+                <TimeCreated SystemTime="2024-01-05T10:00:00.000Z" />
+                <Computer>HOST1</Computer>
+              </System>
+              <EventData />
+            </Event>
+            <Event xmlns="http://schemas.microsoft.com/win/2004/08/events/event">
+              <System>
+                <Provider Name="Provider2" />
+                <EventID>4625</EventID>
+                <Level>0</Level>
+                <TimeCreated SystemTime="2024-01-05T10:01:00.000Z" />
+                <Computer>HOST2</Computer>
+              </System>
+              <EventData />
+            </Event>
+            </Events>
+        """)
+        entries = self.parser.parse_xml_string(xml)
+        assert len(entries) == 2
+
+    def test_parse_invalid_xml(self) -> None:
+        entries = self.parser.parse_xml_string("not xml at all")
+        assert entries == []
+
+    def test_parse_file(self) -> None:
+        xml_content = textwrap.dedent("""\
+            <Events>
+            <Event xmlns="http://schemas.microsoft.com/win/2004/08/events/event">
+              <System>
+                <Provider Name="TestProvider" />
+                <EventID>1000</EventID>
+                <Level>4</Level>
+                <TimeCreated SystemTime="2024-06-15T08:30:00.000Z" />
+                <Computer>TESTPC</Computer>
+              </System>
+              <EventData />
+            </Event>
+            </Events>
+        """)
+        fd, path = tempfile.mkstemp(suffix=".xml")
+        try:
+            with os.fdopen(fd, "w") as f:
+                f.write(xml_content)
+            entries = self.parser.parse_file(path)
+            assert len(entries) == 1
+            assert entries[0].hostname == "TESTPC"
+        finally:
+            os.unlink(path)
+
+
+# ---------------------------------------------------------------------------
+# Factory function tests
+# ---------------------------------------------------------------------------
+
+class TestGetParser:
+    """Tests for the get_parser factory function."""
+
+    def test_get_syslog_parser(self) -> None:
+        parser = get_parser("syslog")
+        assert isinstance(parser, SyslogParser)
+
+    def test_get_authlog_parser(self) -> None:
+        parser = get_parser("authlog")
+        assert isinstance(parser, AuthLogParser)
+
+    def test_get_apache_parser(self) -> None:
+        parser = get_parser("apache")
+        assert isinstance(parser, ApacheParser)
+
+    def test_get_windows_parser(self) -> None:
+        parser = get_parser("windows")
+        assert isinstance(parser, WindowsEventParser)
+
+    def test_get_unknown_parser_raises(self) -> None:
+        with pytest.raises(ValueError, match="Unknown log format"):
+            get_parser("unknown_format")
