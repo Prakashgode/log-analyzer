@@ -164,18 +164,256 @@ class BruteForceDetector:
         return alerts
 
 
+class PrivilegeEscalationDetector:
+    """Detect privilege escalation attempts.
+
+    Identifies sudo abuse, unauthorized su usage, sensitive commands
+    run as root, and Windows privilege assignment events.
+    """
+
+    _SENSITIVE_COMMANDS = [
+        r"/bin/bash",
+        r"/bin/sh",
+        r"passwd",
+        r"useradd",
+        r"usermod",
+        r"groupadd",
+        r"visudo",
+        r"chmod\s+[0-7]*[4-7][0-7]{2}",
+        r"chown\s+root",
+        r"/etc/shadow",
+        r"/etc/sudoers",
+    ]
+    _SENSITIVE_PATTERN = re.compile("|".join(_SENSITIVE_COMMANDS), re.IGNORECASE)
+
+    def detect(self, entries: List[LogEntry]) -> List[Alert]:
+        """Analyze log entries for privilege escalation patterns.
+
+        Args:
+            entries: List of parsed log entries.
+
+        Returns:
+            List of privilege escalation alerts.
+        """
+        alerts: List[Alert] = []
+
+        for entry in entries:
+            event_type = entry.metadata.get("event_type", "")
+
+            # Detect sudo to root with sensitive commands
+            if event_type == "sudo_command":
+                target_user = entry.metadata.get("target_user", "")
+                command = entry.metadata.get("command", "")
+                username = entry.metadata.get("username", "")
+
+                if target_user == "root" and self._SENSITIVE_PATTERN.search(command):
+                    alerts.append(Alert(
+                        timestamp=entry.timestamp,
+                        alert_type="privilege_escalation",
+                        severity=AlertSeverity.HIGH,
+                        source_ip=entry.metadata.get("source_ip"),
+                        description=(
+                            f"Sensitive sudo command by {username}: "
+                            f"sudo -u {target_user} {command}"
+                        ),
+                        evidence=[entry.raw],
+                        metadata={
+                            "username": username,
+                            "target_user": target_user,
+                            "command": command,
+                        },
+                    ))
+
+            # Detect su sessions to root
+            elif event_type == "su_session":
+                target_user = entry.metadata.get("target_user", "")
+                action = entry.metadata.get("action", "")
+                by_user = entry.metadata.get("by_user", "unknown")
+
+                if target_user == "root" and action == "opened":
+                    alerts.append(Alert(
+                        timestamp=entry.timestamp,
+                        alert_type="privilege_escalation",
+                        severity=AlertSeverity.MEDIUM,
+                        source_ip=entry.metadata.get("source_ip"),
+                        description=(
+                            f"su session to root opened by {by_user}"
+                        ),
+                        evidence=[entry.raw],
+                        metadata={
+                            "by_user": by_user,
+                            "target_user": target_user,
+                        },
+                    ))
+
+            # Detect Windows special privileges
+            elif entry.source == "windows":
+                event_id = entry.metadata.get("event_id")
+                if event_id == 4672:
+                    username = entry.metadata.get("SubjectUserName", "unknown")
+                    alerts.append(Alert(
+                        timestamp=entry.timestamp,
+                        alert_type="privilege_escalation",
+                        severity=AlertSeverity.MEDIUM,
+                        source_ip=entry.metadata.get("IpAddress"),
+                        description=(
+                            f"Special privileges assigned to {username}"
+                        ),
+                        evidence=[entry.raw],
+                        metadata={
+                            "event_id": event_id,
+                            "username": username,
+                        },
+                    ))
+
+        return alerts
+
+
+class SuspiciousCommandDetector:
+    """Detect suspicious command execution patterns.
+
+    Identifies reverse shell attempts, data exfiltration patterns,
+    reconnaissance commands, and other indicators of compromise.
+    """
+
+    _REVERSE_SHELL_PATTERNS = [
+        r"bash\s+-i\s+>&\s*/dev/tcp/",
+        r"nc\s+-e\s+/bin/(ba)?sh",
+        r"ncat\s.*-e\s+/bin/(ba)?sh",
+        r"python\s+-c\s+.*socket.*connect",
+        r"python3\s+-c\s+.*socket.*connect",
+        r"perl\s+-e\s+.*socket.*INET",
+        r"ruby\s+-rsocket\s+-e",
+        r"php\s+-r\s+.*fsockopen",
+        r"mkfifo\s+/tmp/",
+        r"socat\s+.*exec:",
+    ]
+
+    _EXFIL_PATTERNS = [
+        r"curl\s+.*-d\s+@",
+        r"curl\s+.*--data.*@",
+        r"wget\s+.*--post-file",
+        r"scp\s+.*@.*:",
+        r"rsync\s+.*@.*:",
+        r"base64\s+.*\|\s*(curl|wget|nc)",
+        r"tar\s+.*\|\s*(curl|wget|nc|ncat)",
+        r"dd\s+if=/dev/sd",
+    ]
+
+    _RECON_PATTERNS = [
+        r"cat\s+/etc/passwd",
+        r"cat\s+/etc/shadow",
+        r"cat\s+/etc/hosts",
+        r"whoami",
+        r"id\s*$",
+        r"uname\s+-a",
+        r"ifconfig\s*$",
+        r"ip\s+addr",
+        r"netstat\s+-",
+        r"ss\s+-",
+        r"ps\s+aux",
+        r"find\s+/\s+.*-perm",
+        r"find\s+.*-name\s+.*\.conf",
+    ]
+
+    def __init__(self) -> None:
+        self._reverse_shell_re = re.compile(
+            "|".join(self._REVERSE_SHELL_PATTERNS), re.IGNORECASE
+        )
+        self._exfil_re = re.compile(
+            "|".join(self._EXFIL_PATTERNS), re.IGNORECASE
+        )
+        self._recon_re = re.compile(
+            "|".join(self._RECON_PATTERNS), re.IGNORECASE
+        )
+
+    def detect(self, entries: List[LogEntry]) -> List[Alert]:
+        """Analyze log entries for suspicious command patterns.
+
+        Args:
+            entries: List of parsed log entries.
+
+        Returns:
+            List of suspicious command alerts.
+        """
+        alerts: List[Alert] = []
+
+        for entry in entries:
+            command = entry.metadata.get("command", "")
+            message = entry.message
+            text_to_check = f"{command} {message}"
+
+            # Check reverse shell patterns
+            if self._reverse_shell_re.search(text_to_check):
+                alerts.append(Alert(
+                    timestamp=entry.timestamp,
+                    alert_type="reverse_shell",
+                    severity=AlertSeverity.CRITICAL,
+                    source_ip=entry.metadata.get("source_ip"),
+                    description=(
+                        f"Reverse shell attempt detected: {command or message}"
+                    ),
+                    evidence=[entry.raw],
+                    metadata={
+                        "detection_type": "reverse_shell",
+                        "command": command or message,
+                        "hostname": entry.hostname,
+                    },
+                ))
+
+            # Check data exfiltration patterns
+            elif self._exfil_re.search(text_to_check):
+                alerts.append(Alert(
+                    timestamp=entry.timestamp,
+                    alert_type="data_exfiltration",
+                    severity=AlertSeverity.HIGH,
+                    source_ip=entry.metadata.get("source_ip"),
+                    description=(
+                        f"Potential data exfiltration detected: {command or message}"
+                    ),
+                    evidence=[entry.raw],
+                    metadata={
+                        "detection_type": "data_exfiltration",
+                        "command": command or message,
+                        "hostname": entry.hostname,
+                    },
+                ))
+
+            # Check reconnaissance patterns
+            elif self._recon_re.search(text_to_check):
+                alerts.append(Alert(
+                    timestamp=entry.timestamp,
+                    alert_type="reconnaissance",
+                    severity=AlertSeverity.LOW,
+                    source_ip=entry.metadata.get("source_ip"),
+                    description=(
+                        f"Reconnaissance command detected: {command or message}"
+                    ),
+                    evidence=[entry.raw],
+                    metadata={
+                        "detection_type": "reconnaissance",
+                        "command": command or message,
+                        "hostname": entry.hostname,
+                    },
+                ))
+
+        return alerts
+
+
 def run_all_detectors(
     entries,
     brute_force_threshold: int = 5,
     brute_force_window: int = 300,
     **kwargs,
 ):
-    # TODO: add more detectors
     detectors = [
         BruteForceDetector(
             threshold=brute_force_threshold,
             window_seconds=brute_force_window,
         ),
+        PrivilegeEscalationDetector(),
+        SuspiciousCommandDetector(),
+        # TODO: anomaly detection - need to figure out good z-score defaults
     ]
 
     all_alerts = []
