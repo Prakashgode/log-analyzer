@@ -400,12 +400,219 @@ class SuspiciousCommandDetector:
         return alerts
 
 
+class AnomalyDetector:
+    """Statistical anomaly detection for security events.
+
+    Identifies unusual login times, abnormal request volumes,
+    and previously unseen source IPs using statistical methods.
+
+    Args:
+        unusual_hour_start: Hour (0-23) when logins become unusual.
+        unusual_hour_end: Hour (0-23) when logins stop being unusual.
+        zscore_threshold: Z-score threshold for volume anomalies.
+        baseline_window_days: Days of data to use for baseline.
+    """
+
+    def __init__(
+        self,
+        unusual_hour_start: int = 22,
+        unusual_hour_end: int = 6,
+        zscore_threshold: float = 2.0,
+        baseline_window_days: int = 7,
+    ) -> None:
+        self.unusual_hour_start = unusual_hour_start
+        self.unusual_hour_end = unusual_hour_end
+        self.zscore_threshold = zscore_threshold
+        self.baseline_window_days = baseline_window_days
+
+    def _is_unusual_hour(self, hour: int) -> bool:
+        """Check if an hour falls within the unusual time range."""
+        if self.unusual_hour_start > self.unusual_hour_end:
+            # Wraps around midnight (e.g., 22:00 to 06:00)
+            return hour >= self.unusual_hour_start or hour < self.unusual_hour_end
+        else:
+            return self.unusual_hour_start <= hour < self.unusual_hour_end
+
+    def detect(self, entries: List[LogEntry]) -> List[Alert]:
+        """Analyze log entries for statistical anomalies.
+
+        Args:
+            entries: List of parsed log entries.
+
+        Returns:
+            List of anomaly alerts.
+        """
+        alerts: List[Alert] = []
+
+        alerts.extend(self._detect_unusual_login_times(entries))
+        alerts.extend(self._detect_volume_anomalies(entries))
+        alerts.extend(self._detect_new_source_ips(entries))
+
+        return alerts
+
+    def _detect_unusual_login_times(self, entries: List[LogEntry]) -> List[Alert]:
+        """Detect logins during unusual hours."""
+        alerts: List[Alert] = []
+
+        for entry in entries:
+            event_type = entry.metadata.get("event_type", "")
+            if event_type != "successful_login":
+                continue
+
+            hour = entry.timestamp.hour
+            if self._is_unusual_hour(hour):
+                username = entry.metadata.get("username", "unknown")
+                source_ip = entry.metadata.get("source_ip")
+
+                alerts.append(Alert(
+                    timestamp=entry.timestamp,
+                    alert_type="unusual_login_time",
+                    severity=AlertSeverity.MEDIUM,
+                    source_ip=source_ip,
+                    description=(
+                        f"Unusual login time for {username} from {source_ip} "
+                        f"at {entry.timestamp.strftime('%H:%M:%S')}"
+                    ),
+                    evidence=[entry.raw],
+                    metadata={
+                        "username": username,
+                        "login_hour": hour,
+                        "unusual_range": f"{self.unusual_hour_start}:00-{self.unusual_hour_end}:00",
+                    },
+                ))
+
+        return alerts
+
+    def _detect_volume_anomalies(self, entries: List[LogEntry]) -> List[Alert]:
+        """Detect abnormal event volume using z-score analysis."""
+        alerts: List[Alert] = []
+
+        if len(entries) < 3:
+            return alerts
+
+        # Count events per hour
+        hourly_counts: defaultdict[str, int] = defaultdict(int)
+        for entry in entries:
+            hour_key = entry.timestamp.strftime("%Y-%m-%d %H")
+            hourly_counts[hour_key] += 1
+
+        counts = list(hourly_counts.values())
+        if len(counts) < 3:
+            return alerts
+
+        mean = statistics.mean(counts)
+        stdev = statistics.stdev(counts)
+
+        if stdev == 0:
+            return alerts
+
+        for hour_key, count in hourly_counts.items():
+            zscore = (count - mean) / stdev
+            if zscore > self.zscore_threshold:
+                alerts.append(Alert(
+                    timestamp=datetime.strptime(hour_key, "%Y-%m-%d %H"),
+                    alert_type="volume_anomaly",
+                    severity=AlertSeverity.MEDIUM,
+                    source_ip=None,
+                    description=(
+                        f"Abnormal event volume in hour {hour_key}: "
+                        f"{count} events (z-score: {zscore:.2f}, "
+                        f"mean: {mean:.1f}, stdev: {stdev:.1f})"
+                    ),
+                    evidence=[],
+                    metadata={
+                        "hour": hour_key,
+                        "event_count": count,
+                        "zscore": round(zscore, 2),
+                        "mean": round(mean, 1),
+                        "stdev": round(stdev, 1),
+                    },
+                ))
+
+        return alerts
+
+    def _detect_new_source_ips(self, entries: List[LogEntry]) -> List[Alert]:
+        """Detect logins from previously unseen source IPs.
+
+        Splits entries into a baseline period and a detection period.
+        Any IP seen in the detection period but not in the baseline
+        generates an alert.
+        """
+        alerts: List[Alert] = []
+
+        login_entries = [
+            e for e in entries
+            if e.metadata.get("event_type") in ("successful_login", "failed_login")
+            and e.metadata.get("source_ip")
+        ]
+
+        if not login_entries:
+            return alerts
+
+        login_entries.sort(key=lambda e: e.timestamp)
+
+        # Use the first portion as baseline, rest as detection window
+        total = len(login_entries)
+        if total < 4:
+            return alerts
+
+        baseline_cutoff = total // 2
+        baseline_ips: set[str] = set()
+        for entry in login_entries[:baseline_cutoff]:
+            ip = entry.metadata.get("source_ip")
+            if ip:
+                baseline_ips.add(ip)
+
+        # Check for new IPs in detection window
+        seen_new: set[str] = set()
+        for entry in login_entries[baseline_cutoff:]:
+            ip = entry.metadata.get("source_ip", "")
+            if ip and ip not in baseline_ips and ip not in seen_new:
+                seen_new.add(ip)
+                alerts.append(Alert(
+                    timestamp=entry.timestamp,
+                    alert_type="new_source_ip",
+                    severity=AlertSeverity.LOW,
+                    source_ip=ip,
+                    description=(
+                        f"Login attempt from previously unseen IP: {ip}"
+                    ),
+                    evidence=[entry.raw],
+                    metadata={
+                        "source_ip": ip,
+                        "event_type": entry.metadata.get("event_type"),
+                        "username": entry.metadata.get("username", "unknown"),
+                        "baseline_ip_count": len(baseline_ips),
+                    },
+                ))
+
+        return alerts
+
+
 def run_all_detectors(
-    entries,
+    entries: List[LogEntry],
     brute_force_threshold: int = 5,
     brute_force_window: int = 300,
-    **kwargs,
-):
+    unusual_hour_start: int = 22,
+    unusual_hour_end: int = 6,
+    zscore_threshold: float = 2.0,
+) -> List[Alert]:
+    """Run all detectors against a set of log entries.
+
+    Convenience function that instantiates and runs every detector
+    and returns a combined, time-sorted list of alerts.
+
+    Args:
+        entries: List of parsed log entries.
+        brute_force_threshold: Failed attempts threshold.
+        brute_force_window: Time window in seconds.
+        unusual_hour_start: Start of unusual hour range.
+        unusual_hour_end: End of unusual hour range.
+        zscore_threshold: Z-score threshold for volume anomalies.
+
+    Returns:
+        Combined list of alerts sorted by timestamp.
+    """
     detectors = [
         BruteForceDetector(
             threshold=brute_force_threshold,
@@ -413,10 +620,14 @@ def run_all_detectors(
         ),
         PrivilegeEscalationDetector(),
         SuspiciousCommandDetector(),
-        # TODO: anomaly detection - need to figure out good z-score defaults
+        AnomalyDetector(
+            unusual_hour_start=unusual_hour_start,
+            unusual_hour_end=unusual_hour_end,
+            zscore_threshold=zscore_threshold,
+        ),
     ]
 
-    all_alerts = []
+    all_alerts: List[Alert] = []
     for detector in detectors:
         all_alerts.extend(detector.detect(entries))
 
