@@ -4,3 +4,4 @@
 - handle multiline syslog entries
 - csv export
 - email alerts on critical findings
+- add debug logging option
