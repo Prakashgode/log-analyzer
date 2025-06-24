@@ -6,3 +6,4 @@
 ## v0.2 - planned
 - windows event log support
 - privilege escalation detection
+- correlator engine
