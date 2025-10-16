@@ -1,0 +1,13 @@
+log parsing tool ideas
+======================
+- parse syslog format (RFC 3164)
+- maybe auth.log too?
+- detect brute force attempts
+- output to json
+
+need to figure out:
+- timestamp parsing (syslog doesn't have year, annoying)
+- how to handle different formats
+- regex vs pyparsing?
+
+starting with regex, simpler
