@@ -1,3 +1,5 @@
+![CI](https://github.com/Prakashgode/log-analyzer/actions/workflows/ci.yml/badge.svg)
+
 # LogAnalyzer - Security Log Analysis & Correlation Engine
 
 A Python-based log analysis tool that parses, correlates, and detects anomalies across multiple log sources (syslog, auth.log, Apache/Nginx, Windows Event Logs). Built for SOC analysts and blue team operations.
@@ -79,6 +81,21 @@ chains = correlator.detect_attack_chains()
 # Generate report
 reporter = Reporter()
 reporter.generate(alerts, format="json", output_path="report.json")
+```
+
+## Sample Output
+
+```
+$ python -m log_analyzer analyze ./sample_logs/
+Parsing syslog.log... 1247 events
+Parsing auth.log... 892 events
+Parsing apache_access.log... 3201 events
+
+[ALERT] Brute force detected: 47 failed SSH logins from 192.168.1.105 in 5 minutes
+[ALERT] Privilege escalation: user 'www-data' ran sudo on 3 commands
+[ALERT] Suspicious command: reverse shell pattern detected in auth.log:847
+
+Summary: 3 alerts across 5340 events from 3 log sources
 ```
 
 ## Configuration
