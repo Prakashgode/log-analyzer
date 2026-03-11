@@ -414,6 +414,7 @@ class AnomalyDetector:
     """
 
     def __init__(
+        # TODO: clean this up later
         self,
         unusual_hour_start: int = 22,
         unusual_hour_end: int = 6,
