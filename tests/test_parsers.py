@@ -13,13 +13,11 @@ import pytest
 from log_analyzer.parsers import (
     ApacheParser,
     AuthLogParser,
-    LogEntry,
     Severity,
     SyslogParser,
     WindowsEventParser,
     get_parser,
 )
-
 
 # ---------------------------------------------------------------------------
 # SyslogParser tests
@@ -92,6 +90,16 @@ class TestSyslogParser:
         assert len(entries) == 3
         assert entries[0].message == "message one"
         assert entries[2].message == "message three"
+
+    def test_parse_syslog_december_rolls_back_during_january(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        reference_time = datetime(2026, 1, 2, 9, 0, 0)
+        monkeypatch.setattr(self.parser, "_current_time", lambda: reference_time)
+
+        line = "Dec 31 23:59:59 host1 sshd[123]: year rollover check"
+        entry = self.parser.parse_line(line)
+
+        assert entry is not None
+        assert entry.timestamp == datetime(2025, 12, 31, 23, 59, 59)
 
     def test_parse_file(self) -> None:
         fd, path = tempfile.mkstemp(suffix=".log")

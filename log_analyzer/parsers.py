@@ -78,6 +78,40 @@ class BaseParser(ABC):
             A LogEntry if the line was successfully parsed, otherwise None.
         """
 
+    def _current_time(self) -> datetime:
+        """Return the current local time.
+
+        Separated for deterministic tests around year rollover handling.
+        """
+        return datetime.now()
+
+    def _parse_yearless_timestamp(self, raw_timestamp: str) -> Optional[datetime]:
+        """Parse a syslog-style timestamp that does not include a year.
+
+        Syslog and auth.log timestamps omit the year, so this parser defaults
+        to the current year and rolls back December entries when analyzing
+        logs in January.
+        """
+        parts = raw_timestamp.split()
+        if len(parts) != 3:
+            return None
+
+        normalized = " ".join(parts)
+        now = self._current_time()
+
+        try:
+            parsed = datetime.strptime(
+                f"{normalized} {now.year}",
+                "%b %d %H:%M:%S %Y",
+            )
+        except ValueError:
+            return None
+
+        if parsed.month == 12 and now.month == 1 and parsed > now:
+            parsed = parsed.replace(year=parsed.year - 1)
+
+        return parsed
+
     def parse_file(self, filepath: Union[str, Path]) -> List[LogEntry]:
         """Parse all lines in a log file.
 
@@ -172,16 +206,9 @@ class SyslogParser(BaseParser):
 
         groups = match.groupdict()
 
-        # Parse timestamp (syslog has no year, assume current year)
-        try:
-            ts = datetime.strptime(groups["timestamp"], "%b %d %H:%M:%S")
-            ts = ts.replace(year=datetime.now().year)
-        except ValueError:
-            try:
-                ts = datetime.strptime(groups["timestamp"], "%b  %d %H:%M:%S")
-                ts = ts.replace(year=datetime.now().year)
-            except ValueError:
-                return None
+        ts = self._parse_yearless_timestamp(groups["timestamp"])
+        if ts is None:
+            return None
 
         pid = int(groups["pid"]) if groups["pid"] else None
         message = groups["message"]
@@ -301,15 +328,9 @@ class AuthLogParser(BaseParser):
 
         groups = match.groupdict()
 
-        try:
-            ts = datetime.strptime(groups["timestamp"], "%b %d %H:%M:%S")
-            ts = ts.replace(year=datetime.now().year)
-        except ValueError:
-            try:
-                ts = datetime.strptime(groups["timestamp"], "%b  %d %H:%M:%S")
-                ts = ts.replace(year=datetime.now().year)
-            except ValueError:
-                return None
+        ts = self._parse_yearless_timestamp(groups["timestamp"])
+        if ts is None:
+            return None
 
         pid = int(groups["pid"]) if groups["pid"] else None
         message = groups["message"]
