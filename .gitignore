@@ -12,8 +12,10 @@ env/
 .env
 *.log
 .pytest_cache/
+.ruff_cache/
 .coverage
 htmlcov/
 .mypy_cache/
 .vscode/
 .idea/
+CODEX_HANDOFF.md

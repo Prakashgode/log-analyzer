@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime
 from enum import Enum
 from typing import List, Optional
 
@@ -341,7 +341,7 @@ class EventCorrelator:
         Returns:
             An AttackChain if multi-stage, otherwise None.
         """
-        stages = list(dict.fromkeys(
+        stages: List[AttackStage] = list(dict.fromkeys(
             e.stage for e in events if e.stage != AttackStage.UNKNOWN
         ))
 

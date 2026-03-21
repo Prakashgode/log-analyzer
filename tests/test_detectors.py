@@ -4,10 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
-import pytest
-
 from log_analyzer.detectors import (
-    Alert,
     AlertSeverity,
     AnomalyDetector,
     BruteForceDetector,
@@ -53,7 +50,7 @@ class TestBruteForceDetector:
         entries = [
             _make_entry(
                 timestamp=base_time + timedelta(seconds=i * 5),
-                message=f"Failed password for root from 10.0.0.1 port 22 ssh2",
+                message="Failed password for root from 10.0.0.1 port 22 ssh2",
                 severity=Severity.WARNING,
                 metadata={
                     "event_type": "failed_login",

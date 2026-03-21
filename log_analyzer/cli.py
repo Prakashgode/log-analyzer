@@ -15,7 +15,7 @@ from typing import List, Optional
 
 from log_analyzer import __version__
 from log_analyzer.correlator import EventCorrelator
-from log_analyzer.detectors import Alert, run_all_detectors
+from log_analyzer.detectors import run_all_detectors
 from log_analyzer.parsers import LogEntry, get_parser
 from log_analyzer.reporter import Reporter
 

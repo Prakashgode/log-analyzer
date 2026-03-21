@@ -125,15 +125,9 @@ anomaly = AnomalyDetector(
 
 ## Contributing
 
-Contributions are welcome. Please follow these steps:
+Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for local setup, CI checks, and pull request expectations.
 
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/new-detector`)
-3. Write tests for your changes
-4. Ensure all tests pass (`pytest`)
-5. Submit a pull request
-
-Please follow PEP 8 style guidelines and include type hints for all function signatures.
+Security issues should be reported privately as described in [SECURITY.md](SECURITY.md).
 
 ## License
 

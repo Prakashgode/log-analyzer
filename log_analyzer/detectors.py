@@ -11,11 +11,11 @@ import re
 import statistics
 from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime
 from enum import Enum
 from typing import List, Optional
 
-from log_analyzer.parsers import LogEntry, Severity
+from log_analyzer.parsers import LogEntry
 
 
 class AlertSeverity(Enum):
@@ -614,7 +614,12 @@ def run_all_detectors(
     Returns:
         Combined list of alerts sorted by timestamp.
     """
-    detectors = [
+    detectors: List[
+        BruteForceDetector
+        | PrivilegeEscalationDetector
+        | SuspiciousCommandDetector
+        | AnomalyDetector
+    ] = [
         BruteForceDetector(
             threshold=brute_force_threshold,
             window_seconds=brute_force_window,

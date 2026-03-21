@@ -12,7 +12,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
 
-from log_analyzer.detectors import Alert, AlertSeverity
+from log_analyzer.detectors import Alert
 from log_analyzer.parsers import LogEntry
 
 
