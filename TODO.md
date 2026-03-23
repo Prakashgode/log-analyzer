@@ -18,3 +18,4 @@
 
 - Handle multiline syslog-style entries when logs contain wrapped messages.
 - Add optional debug logging for parser and detector troubleshooting.
+- jsonl formatter
